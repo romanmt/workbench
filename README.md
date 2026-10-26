@@ -8,7 +8,7 @@ Swift 6 + AppKit on top of [libghostty](https://github.com/ghostty-org/ghostty) 
 - Quit and reopen resumes every agent through the launcher it was started with (`cc2 --resume …`, `gpt1 resume --last`)
 - ⌘V pastes clipboard images into Claude Code / Codex
 - Native markdown preview (⌘-click a `.md` path, or `pane open file.md`), live-reloading
-- Web panes for agents: `pane browse <file|url>` opens a page right of the pane, `pane eval <pane> <js>` drives it (the claude-mods panels use them)
+- Web panes for agents: `pane browse <file|url>` opens a page right of the pane, `pane eval <pane> <js>` drives it, `pane close <pane>` closes it (the claude-mods panels use them)
 - Themes in Superset's JSON format (Oceanic v2 by default); your `~/.config/ghostty/config` still applies
 
 ## Build and install
@@ -38,6 +38,6 @@ Update later with `scripts/update.sh` (pull, rebuild, install).
 ## Control CLI
 
 Every pane gets `PANE_ID` and `PANE_BIN`; agents can drive the app with
-`"$PANE_BIN" list | focus <pane> | split [--down] [cmd] | send <pane> <text> | open <file.md> | browse <file|url> [--beside <pane>] [--ratio 0.33] | eval <pane> <js>`.
+`"$PANE_BIN" list | focus <pane> | split [--down] [cmd] | send <pane> <text> | open <file.md> | browse <file|url> [--beside <pane>] [--ratio 0.33] | eval <pane> <js> | close <pane>`.
 
 State lives in `~/Library/Application Support/Workbench/` (`layout.json`, `themes/`).

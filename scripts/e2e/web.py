@@ -168,6 +168,17 @@ def test_cli(app, f):
     assert out.returncode == 1, out.stdout
 
 
+def test_close(app, f):
+    pane = browse(app, f)
+    assert app.call("close", pane=f.terminal) == {"error": "unknown pane"}   # a terminal is not closed this way
+    assert app.ok("close", pane=pane) == {}
+    assert pane not in [r["pane"] for r in app.rows("web")]
+    assert [r["pane"] for r in app.rows("terminal")] == [f.terminal]
+    assert app.call("eval", pane=pane, code="1") == {"error": "unknown pane"}
+    out = app.cli("close", pane, pane=f.terminal, cwd=f.work)
+    assert out.returncode == 1 and "unknown pane" in out.stderr, (out.stdout, out.stderr)
+
+
 def test_not_restored(app, f):
     assert app.rows("web"), "no web panes to drop"
     time.sleep(1)   # the debounced save
@@ -177,7 +188,7 @@ def test_not_restored(app, f):
 
 
 TESTS = [test_browse_beside_and_eval_before_load, test_eval_values, test_page_written_by_eval, test_cli,
-         test_not_restored]
+         test_close, test_not_restored]
 
 
 def main():
