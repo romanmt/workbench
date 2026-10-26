@@ -135,6 +135,7 @@ struct Backup: Codable, Sendable {
                 switch s.kind {
                 case .terminal(let cwd, let launch): s.kind = .terminal(cwd: moved(cwd), launch: launch)
                 case .file(let p): s.kind = .file(path: moved(p))
+                case .web: break
                 }
             }
         }

@@ -74,6 +74,7 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("UniformTypeIdentifiers"),
                 .linkedFramework("UserNotifications"),
+                .linkedFramework("WebKit"),
             ]
         ),
     ]
