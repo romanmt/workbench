@@ -191,6 +191,10 @@ enum ControlClient {
             // eval <pane> <js...>: prints {"result": <value>}
             guard rest.count >= 2 else { return usage() }
             msg = ["cmd": "eval", "pane": rest[0], "code": rest.dropFirst().joined(separator: " ")]
+        case "close":
+            // close <pane>: a web pane
+            guard let id = rest.first else { return usage() }
+            msg = ["cmd": "close", "pane": id]
         case "add":
             let p = rest.first ?? "."
             let abs = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
@@ -231,6 +235,7 @@ enum ControlClient {
           open <path>
           browse <url|file> [--beside <pane-id>] [--ratio <0.1-0.9>]
           eval <pane-id> <js...>
+          close <pane-id>
           add [dir]
           clone <url> [dir]
 

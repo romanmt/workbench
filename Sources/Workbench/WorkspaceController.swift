@@ -1569,6 +1569,10 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard let base = pane, locate(base) != nil else { return #"{"error":"unknown pane"}"# }
             let share = msg["ratio"].flatMap(Double.init).map { min(max($0, 0.1), 0.9) } ?? 0.5
             return #"{"pane":"\#(openWeb(url, beside: base, share: share).uuidString)"}"#
+        case "close":   // web panes only: the agent that opened one closes it; terminals keep their confirm
+            guard let id = pane, views[id] is WebPaneView else { return #"{"error":"unknown pane"}"# }
+            closePane(id, confirm: false)
+            return "{}"
         case "clone":
             guard let remote = msg["url"].flatMap(GitRemote.init) else { return #"{"error":"not a git url"}"# }
             let path = msg["path"] ?? ((cloneLocations().first ?? NSHomeDirectory()) as NSString).appendingPathComponent(remote.folder)
