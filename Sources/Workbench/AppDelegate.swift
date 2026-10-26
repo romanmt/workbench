@@ -30,8 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
 
-        let server = ControlServer(path: Store.directory.appendingPathComponent("pane.sock").path) { [unowned self] msg in
-            workspace.handleControl(msg)
+        let server = ControlServer(path: Store.directory.appendingPathComponent("pane.sock").path) { [unowned self] msg, reply in
+            workspace.handleControl(msg, reply: reply)
         }
         server.start()
         control = server

@@ -10,8 +10,9 @@ struct Launch: Codable, Equatable, Sendable {
 enum PaneKind: Codable, Equatable, Sendable {
     case terminal(cwd: String, launch: Launch?)
     case file(path: String)   // markdown preview, or highlighted code
+    case web(url: String)     // a page an agent opened beside its terminal (`pane browse`); dropped at load
 
-    private enum CodingKeys: String, CodingKey { case terminal, file = "markdown" }   // saved layouts predate code files
+    private enum CodingKeys: String, CodingKey { case terminal, file = "markdown", web }   // saved layouts predate code files
 }
 
 struct PaneSpec: Codable, Equatable, Sendable {
@@ -165,6 +166,21 @@ func visibleProjectIndices(_ projects: [Project], hidden: Bool, workspace: UUID?
     }
 }
 
+/// Web panes belong to the agent that opened them, which opens its page again; a tab left empty goes too.
+func dropWebPanes(_ l: inout Layout) {
+    for i in l.projects.indices {
+        l.projects[i].tabs = l.projects[i].tabs.compactMap { tab in
+            var tab = tab
+            for leaf in tab.root.leaves {
+                guard case .web = leaf.kind else { continue }
+                guard let rest = tab.root.removing(leaf.id) else { return nil }
+                tab.root = rest
+            }
+            return tab
+        }
+    }
+}
+
 /// Indices of the scratch terminals, in order (the sidebar's bottom area).
 func scratchProjectIndices(_ projects: [Project]) -> [Int] {
     projects.indices.filter { projects[$0].scratch == true }
@@ -270,6 +286,7 @@ func readFile(_ url: URL, cap: Int) -> Data? {
         // -1 = no project selected (every active one hidden); keep it rather than surfacing a hidden project.
         l.activeProject = l.projects.firstIndex { $0.id == active } ?? (l.activeProject < 0 || l.projects.isEmpty ? -1 : 0)
         normalizeWorkspaces(&l)
+        dropWebPanes(&l)
         for i in l.projects.indices {
             let n = l.projects[i].tabs.count
             l.projects[i].activeTab = n == 0 ? 0 : min(max(l.projects[i].activeTab, 0), n - 1)
@@ -395,6 +412,16 @@ func modelSelfCheck() {
     assert(tree.moving(p1.id, to: p1.id, .left) == tree && tree.moving(p1.id, to: UUID(), .left) == tree)
     let mapped = tree.mapLeaves { $0.kind = .file(path: "/y") }
     assert(mapped.leaves.map(\.id) == tree.leaves.map(\.id) && mapped.leaves.allSatisfy { $0.kind == .file(path: "/y") })
+    // web panes are not restored: the pane goes, and a tab holding only one goes with it
+    let web = PaneSpec(id: UUID(), kind: .web(url: "file:///x.html"))
+    var withWeb = Layout(
+        projects: [Project(id: UUID(), path: "/p", name: "p", tabs: [
+            Tab(id: UUID(), title: "a", root: .split(axis: .horizontal, ratio: 0.6, a: .leaf(p1), b: .leaf(web)), focused: web.id),
+            Tab(id: UUID(), title: "b", root: .leaf(PaneSpec(id: UUID(), kind: .web(url: "https://x"))), focused: nil),
+        ], activeTab: 0)],
+        activeProject: 0, sidebarVisible: true, theme: "t")
+    dropWebPanes(&withWeb)
+    assert(withWeb.projects[0].tabs.count == 1 && withWeb.projects[0].tabs[0].root == .leaf(p1))
     let old = #"{"command":"c","resume":"r {id}","agent":"claude","sessionID":"S"}"#
     assert(try! JSONDecoder().decode(Launch.self, from: Data(old.utf8)) == Launch(command: "c", scrollbackLimit: nil))
     let layout = Layout(

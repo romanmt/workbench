@@ -4,7 +4,7 @@ Native macOS terminal IDE for running many Claude Code / Codex sessions. Swift 6
 
 Build: `swift build -c release`, then `scripts/bundle.sh` → `build.noindex/Workbench.app`. Run: `open build.noindex/Workbench.app`.
 
-E2E: `scripts/bundle.sh --debug` (→ `build.noindex/Workbench-debug.app`; the control socket's test harness commands and `PANE_STATE_DIR` are debug only), then `python3 -I scripts/e2e/clone.py` (isolated state dir, local git server; `--keep`, `-k <name>`).
+E2E: `scripts/bundle.sh --debug` (→ `build.noindex/Workbench-debug.app`; the control socket's test harness commands and `PANE_STATE_DIR` are debug only), then `python3 -I scripts/e2e/clone.py` (isolated state dir, local git server; `--keep`, `-k <name>`) and `python3 -I scripts/e2e/web.py` (web panes: browse, eval, not restored).
 
 Rules: AppKit only (no SwiftUI). macOS 27+. Chrome is Liquid Glass (NSGlassEffectView panels/capsules, `HandButton.glass` round buttons) floating over the solid theme background; never put glass over a terminal surface except transient overlays (find bar), since glass over changing content recomposites every frame. No polling timers. Every C callback is a nonisolated `@convention(c)` function that copies data into owned Swift values and hops to main with `DispatchQueue.main.async`. Never touch a SurfaceView's `wantsLayer`/`layer` before `ghostty_surface_new`. Import GhosttyKit as `@preconcurrency import GhosttyKit`.
 
@@ -17,7 +17,7 @@ struct Launch: Codable, Equatable, Sendable {
     var command: String          // typed into the shell as initial input; rewritten at quit to the running agent's resume command
     var scrollbackLimit: Int?    // bytes; nil = global default
 }
-enum PaneKind: Codable, Equatable, Sendable { case terminal(cwd: String, launch: Launch?), file(path: String) }   // file: markdown preview or highlighted code; coded as "markdown" for old layouts
+enum PaneKind: Codable, Equatable, Sendable { case terminal(cwd: String, launch: Launch?), file(path: String), web(url: String) }   // file: markdown preview or highlighted code; coded as "markdown" for old layouts. web: a page an agent opened (`pane browse`), dropped at load by dropWebPanes (with a tab it leaves empty)
 struct PaneSpec: Codable, Equatable, Sendable { var id: PaneID; var kind: PaneKind }
 enum Axis: String, Codable, Sendable { case horizontal /* a | b, ⌘D */, vertical /* a over b, ⇧⌘D */ }
 indirect enum SplitNode: Codable, Equatable, Sendable {
@@ -151,6 +151,9 @@ enum FocusDirection: Sendable { case left, right, up, down }
 // FilePaneView.swift — .md previewed, other files as monospace code highlighted via Syntax; reloads on file change. Read-only (selectable, links clickable). A regular `.file` pane in the split tree, focusable like a terminal (acceptsFirstResponder forwards to its text view; onFocus → paneFocused), so ⌘W closes it. WorkspaceController.openFile (⌘-click a path, `pane open`, Open File…, Files tree selection with focus false) retargets the tab's existing file pane (kind swapped, view destroyed and rebuilt by the provider) or splits one in right of the focused pane: one preview pane per tab
 @MainActor final class FilePaneView: NSView { let paneID: PaneID; init(id: PaneID, path: String, theme: Theme); func apply(theme: Theme); func close() }
 
+// WebPaneView.swift — a `.web` pane: WKWebView (file: URLs read their folder; inspectable), the page title reported to the pane header, clicked links go through open(URL). WorkspaceController.openWeb (`pane browse`) splits it right of a given pane in that pane's own tab, without moving the project, tab or focus, and makes its view at once so evals reach a tab not on screen. Evals sent before the first load finishes wait for it. Mods' panels (claude-mods) are its main user: they write their page to a file, browse it beside Claude's pane and drive it with eval.
+@MainActor final class WebPaneView: NSView { let paneID: PaneID; var onFocus, onTitle, onOpenLink; init(id: PaneID, url: URL, theme: Theme); func evaluate(_ code: String, done: @escaping (String) -> Void) /* {"result": <JSON value, null when none>} or {"error": …} */; func apply(theme: Theme); func close() }
+
 // Syntax.swift — tree-sitter grammars (SwiftPM packages; queries read from their resource bundles in Contents/Resources)
 enum Syntax {
     static func key(for path: String) -> String?          // grammar key by extension (or file name, e.g. dockerfile); nil = unknown
@@ -226,7 +229,7 @@ struct GitRemote { init?(_ text: String) /* https/http/ssh/git/scp-like; nil for
 enum CloneStatus { case cloning(Int), waiting(String), failed(String) }; enum CloneAction { case retry, editURL, remove }
 final class CloneWatch: Sendable { enum Event { case progress(Int), prompt(String), error(String) }; func scan(_ bytes: UnsafeRawBufferPointer) -> [Event]; func answered(); func reset() }   // SurfaceBox.watch (set while a pane clones) scans its output on the reader queue → PaneEvent.clone
 // Clone: the project (path = <location>/<folder>, name = folder) is added at once; its terminal starts in <location> and the command is typed as initial input (never a Launch, so it is not rerun at restore). WorkspaceController.clones (in memory, by project id) feeds SidebarRow.clone; the pane's first commandFinished ends it: 0 → ordinary project (Files tab reloads, done notification), else failed (git's fatal: line, mapped). A key into a waiting pane answers the prompt. Retry types the command again into the same pane; Edit… reopens the sheet prefilled and replaces the project. Sheet: URL validated live, clipboard offered (read only when pasteboard access is Always Allow, else detected and read on click), Location popup = Layout.cloneLocations (recent, max 6, the default first) + parents of existing projects, Choose…; a destination that exists shows its origin/branch, Open Existing as Project when the origin matches, and "Or clone as" <folder>-N.
-// Control.swift — unix socket at Store.directory/pane.sock, one JSON object per line ([String: String]), one reply line
-final class ControlServer: @unchecked Sendable { init(path: String, handler: @escaping @MainActor ([String: String]) -> String); func start(); func stop() }
+// Control.swift — unix socket at Store.directory/pane.sock, one JSON object per line ([String: String], up to 8 MB), one reply line. The handler replies through a callback, at once or later (eval waits on its page; 20 s cap, then {"error":"timed out"}). Commands: hook, list (kind terminal|file|web), focus, split, send, open, add, clone, browse {url, pane, ratio} → {"pane"}, eval {pane, code} → {"result"}; the CLI waits 25 s for browse/eval, 2 s otherwise.
+final class ControlServer: @unchecked Sendable { init(path: String, handler: @escaping @MainActor ([String: String], @escaping @Sendable (String) -> Void) -> Void); func start(); func stop() }
 enum ControlClient { static func run(_ args: [String]) -> Int32 }   // argv after the program name
 ```

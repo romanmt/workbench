@@ -2,12 +2,13 @@ import Foundation
 
 final class ControlServer: @unchecked Sendable {
     private let path: String
-    private let handler: @MainActor ([String: String]) -> String
+    private let handler: @MainActor ([String: String], @escaping @Sendable (String) -> Void) -> Void
     private let lock = NSLock()
     private var fd: Int32 = -1
     private var stopped = false
 
-    init(path: String, handler: @escaping @MainActor ([String: String]) -> String) {
+    /// `handler` answers through its reply callback, now or later (an eval waits on the page); the first answer counts.
+    init(path: String, handler: @escaping @MainActor ([String: String], @escaping @Sendable (String) -> Void) -> Void) {
         self.path = path
         self.handler = handler
     }
@@ -64,6 +65,27 @@ final class ControlServer: @unchecked Sendable {
         unlink(path)
     }
 
+    static let replyTimeout: Double = 20
+
+    private final class Answer: @unchecked Sendable {
+        private let lock = NSLock()
+        private let ready = DispatchSemaphore(value: 0)
+        private var text: String?
+        func set(_ s: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard text == nil else { return }
+            text = s
+            ready.signal()
+        }
+        func wait(seconds: Double) -> String? {
+            guard ready.wait(timeout: .now() + seconds) == .success else { return nil }
+            lock.lock()
+            defer { lock.unlock() }
+            return text
+        }
+    }
+
     private var isStopped: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -95,14 +117,15 @@ final class ControlServer: @unchecked Sendable {
             if n < 0 && errno == EINTR { continue }
             if n <= 0 { break }
             data.append(contentsOf: buf[0..<n])
-            if data.count > 1 << 20 { data.removeAll(); break }   // oversize: answer "bad request"
+            if data.count > 8 << 20 { data.removeAll(); break }   // oversize: answer "bad request" (an eval can carry a whole page)
             if data.contains(10) { break }
         }
         if let i = data.firstIndex(of: 10) { data = data.prefix(upTo: i) }
         let reply: String
         if let msg = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-            let h = handler
-            reply = DispatchQueue.main.sync { MainActor.assumeIsolated { h(msg) } }
+            let h = handler, answer = Answer()
+            DispatchQueue.main.async { MainActor.assumeIsolated { h(msg) { answer.set($0) } } }
+            reply = answer.wait(seconds: Self.replyTimeout) ?? #"{"error":"timed out"}"#
         } else {
             reply = "{\"error\":\"bad request\"}"
         }
@@ -152,6 +175,22 @@ enum ControlClient {
             guard let p = rest.first else { return usage() }
             let abs = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
             msg = ["cmd": "open", "pane": paneID ?? "", "path": (abs as NSString).standardizingPath]
+        case "browse":
+            // browse <url|file> [--beside <pane>] [--ratio <share of the page>]: a web pane right of the pane
+            guard let target = rest.first else { return usage() }
+            let url: String
+            if target.contains("://") {
+                url = target
+            } else {
+                let abs = target.hasPrefix("/") ? target : FileManager.default.currentDirectoryPath + "/" + target
+                url = URL(fileURLWithPath: (abs as NSString).standardizingPath).absoluteString
+            }
+            msg = ["cmd": "browse", "url": url, "pane": flag("--beside", in: rest) ?? paneID ?? ""]
+            if let r = flag("--ratio", in: rest) { msg["ratio"] = r }
+        case "eval":
+            // eval <pane> <js...>: prints {"result": <value>}
+            guard rest.count >= 2 else { return usage() }
+            msg = ["cmd": "eval", "pane": rest[0], "code": rest.dropFirst().joined(separator: " ")]
         case "add":
             let p = rest.first ?? "."
             let abs = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
@@ -167,7 +206,7 @@ enum ControlClient {
             return usage()
         }
 
-        guard let reply = send(msg, path: path) else {
+        guard let reply = send(msg, path: path, timeout: cmd == "eval" || cmd == "browse" ? Int(ControlServer.replyTimeout) + 5 : 2) else {
             FileHandle.standardError.write(Data("pane: Workbench is not running\n".utf8))
             return 1
         }
@@ -190,6 +229,8 @@ enum ControlClient {
           split [--down] [command...]
           send <pane-id> <text...>
           open <path>
+          browse <url|file> [--beside <pane-id>] [--ratio <0.1-0.9>]
+          eval <pane-id> <js...>
           add [dir]
           clone <url> [dir]
 
@@ -203,11 +244,17 @@ enum ControlClient {
         return d
     }
 
-    /// Connected client socket with 2 s send/receive timeouts, so a stalled app never stalls an agent hook.
-    private static func connect(path: String) -> Int32? {
+    private static func flag(_ name: String, in args: [String]) -> String? {
+        guard let i = args.firstIndex(of: name), args.indices.contains(i + 1) else { return nil }
+        return args[i + 1]
+    }
+
+    /// Connected client socket with send/receive timeouts (2 s unless an eval waits on a page), so a stalled app
+    /// never stalls an agent hook.
+    private static func connect(path: String, timeout: Int) -> Int32? {
         let s = socket(AF_UNIX, SOCK_STREAM, 0)
         guard s >= 0 else { return nil }
-        configure(s)
+        configure(s, timeout: timeout)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)
@@ -224,8 +271,8 @@ enum ControlClient {
         return s
     }
 
-    private static func send(_ msg: [String: String], path: String) -> String? {
-        guard let out = encode(msg), let s = connect(path: path) else { return nil }
+    private static func send(_ msg: [String: String], path: String, timeout: Int = 2) -> String? {
+        guard let out = encode(msg), let s = connect(path: path, timeout: timeout) else { return nil }
         defer { close(s) }
         var off = 0
         while off < out.count {
@@ -266,10 +313,10 @@ func controlSelfCheck() {
 #endif
 
 /// No SIGPIPE, and 2 s send/receive deadlines so a stalled peer never pins a thread or an fd.
-private func configure(_ s: Int32) {
+private func configure(_ s: Int32, timeout: Int = 2) {
     var one: Int32 = 1
     setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-    var tv = timeval(tv_sec: 2, tv_usec: 0)
+    var tv = timeval(tv_sec: timeout, tv_usec: 0)
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 }

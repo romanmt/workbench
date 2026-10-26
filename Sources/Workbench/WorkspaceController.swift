@@ -352,6 +352,15 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             m.onOpenLink = { [unowned self] url in open(url) }
             m.onFocus = { [unowned self] id in paneFocused(id) }
             v = m
+        case let .web(url):
+            let w = WebPaneView(id: spec.id, url: URL(string: url) ?? URL(string: "about:blank")!, theme: theme)
+            w.onFocus = { [unowned self] id in paneFocused(id) }
+            w.onOpenLink = { [unowned self] url in open(url) }
+            w.onTitle = { [unowned self] id, title in
+                titles[id] = title
+                updateChrome()
+            }
+            v = w
         }
         views[spec.id] = v
         return v
@@ -567,6 +576,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                 if let t = titles[id] { return t }
                 switch spec(id)?.kind {
                 case let .file(path)?: return (path as NSString).lastPathComponent
+                case .web?: return "Page"
                 case let .terminal(cwd, _)?: return Self.folderTitle(cwd)
                 case nil: return ""
                 }
@@ -1117,6 +1127,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
     private func destroy(_ id: PaneID) {
         if let s = views[id] as? SurfaceView { s.close() }
         if let m = views[id] as? FilePaneView { m.close() }
+        if let w = views[id] as? WebPaneView { w.close() }
         views[id]?.removeFromSuperview()
         views[id] = nil
         status[id] = nil
@@ -1411,6 +1422,28 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
 
     /// Previews `path` as a file pane: the active tab's existing one is retargeted, else it splits in right of the focused
     /// pane. `focus` false leaves the focused pane and the keyboard alone.
+    /// A web pane right of `base`, taking `share` of its width, in whatever tab `base` is in: the project and tab on
+    /// screen and the focus stay as they are. Its view is made now, so evals reach a page in a tab not on screen.
+    func openWeb(_ url: URL, beside base: PaneID, share: Double) -> PaneID {
+        guard let (p, t) = locate(base), let old = spec(base) else { return base }
+        let new = PaneSpec(id: UUID(), kind: .web(url: url.absoluteString))
+        store.layout.projects[p].tabs[t].root = store.layout.projects[p].tabs[t].root
+            .replacing(base, with: .split(axis: .horizontal, ratio: 1 - share, a: .leaf(old), b: .leaf(new)))
+        store.changed()
+        _ = view(for: new)
+        render(focus: false)
+        return new.id
+    }
+
+    /// The control socket's entry: an eval answers when the page does, everything else at once.
+    func handleControl(_ msg: [String: String], reply: @escaping @Sendable (String) -> Void) {
+        guard msg["cmd"] == "eval" else { return reply(handleControl(msg)) }
+        guard let id = msg["pane"].flatMap(UUID.init(uuidString:)), let w = views[id] as? WebPaneView else {
+            return reply(#"{"error":"unknown pane"}"#)
+        }
+        w.evaluate(msg["code"] ?? "", done: reply)
+    }
+
     func openFile(_ path: String, focus: Bool = true) {
         guard let leaf = activeTab?.root.leaves.first(where: { if case .file = $0.kind { true } else { false } }) else {
             return split(.horizontal, kind: .file(path: path), focus: focus)
@@ -1497,6 +1530,7 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
                     for leaf in tab.root.leaves {
                         var kind = "terminal"
                         if case .file = leaf.kind { kind = "file" }
+                        if case .web = leaf.kind { kind = "web" }
                         rows.append(["pane": leaf.id.uuidString, "project": project.name, "kind": kind,
                                      "title": tab.customTitle ?? titles[leaf.id] ?? tab.title,
                                      "status": "\(status[leaf.id] ?? .idle)"])
@@ -1528,6 +1562,13 @@ final class WorkspaceController: NSWindowController, NSWindowDelegate, RuntimeDe
             guard let path = msg["path"] else { return #"{"error":"no path"}"# }
             openFile(path)
             return "{}"
+        case "browse":
+            guard let raw = msg["url"], let url = URL(string: raw), ["file", "http", "https"].contains(url.scheme ?? "") else {
+                return #"{"error":"not a file, http or https url"}"#
+            }
+            guard let base = pane, locate(base) != nil else { return #"{"error":"unknown pane"}"# }
+            let share = msg["ratio"].flatMap(Double.init).map { min(max($0, 0.1), 0.9) } ?? 0.5
+            return #"{"pane":"\#(openWeb(url, beside: base, share: share).uuidString)"}"#
         case "clone":
             guard let remote = msg["url"].flatMap(GitRemote.init) else { return #"{"error":"not a git url"}"# }
             let path = msg["path"] ?? ((cloneLocations().first ?? NSHomeDirectory()) as NSString).appendingPathComponent(remote.folder)
@@ -1964,6 +2005,7 @@ extension WorkspaceController {
         switch spec.kind {
         case let .terminal(cwd, _): folderTitle(cwd)
         case let .file(path): (path as NSString).lastPathComponent
+        case .web: "Page"
         }
     }
 
